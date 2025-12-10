@@ -1,0 +1,11 @@
+g++ -o sender_udp sender_udp.cpp
+g++ -o sender_tcp sender_tcp.cpp
+
+g++ -o receiver_udp receiver_udp.cpp
+g++ -o receiver_tcp receiver_tcp.cpp
+
+./sender_udp 1000mb.txt 172.22.0.101 9999
+./sender_tcp 1000mb.txt 172.22.0.101 8888
+
+./receiver_udp 9999 udp_file.txt 1000mb.txt
+./receiver_tcp 8888 tcp_file.txt 1000mb.txt
