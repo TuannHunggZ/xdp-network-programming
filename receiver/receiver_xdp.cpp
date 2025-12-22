@@ -13,7 +13,16 @@
 #define CHUNK_SIZE 972
 #define TIMEOUT_SEC 5
 #define HEADER_SIZE 4
-#define WINDOW_SIZE 20
+#define WINDOW_SIZE 5
+
+// Handshake flags (1 byte)
+#define SYN 0x01   // 0000 0001 - Yêu cầu kết nối
+#define ACK 0x02   // 0000 0010 - Xác nhận
+#define FIN 0x04   // 0000 0100 - Kết thúc kết nối
+
+struct HandshakePacket {
+    uint8_t flags;  // 1 byte cho handshake
+};
 
 struct PacketHeader {
     uint32_t pkt_num;
@@ -28,6 +37,70 @@ struct BufferedPacket {
     bool received;
 };
 
+bool waitForHandshake(int sock, struct sockaddr_in& sender_addr, socklen_t& addr_len) {
+    std::cout << "\n=== CHỜ HANDSHAKE ===" << std::endl;
+    std::cout << "Đang đợi yêu cầu kết nối từ sender..." << std::endl;
+    
+    HandshakePacket packet;
+    
+    while (true) {
+        ssize_t recv_len = recvfrom(sock, &packet, sizeof(packet), 0,
+                                    (struct sockaddr*)&sender_addr, &addr_len);
+        
+        if (recv_len < 0) {
+            continue;
+        }
+        
+        // Kiểm tra nếu là gói tin handshake (kích thước nhỏ)
+        if (recv_len == sizeof(HandshakePacket)) {
+            // Bước 1: Nhận SYN
+            if (packet.flags & SYN) {
+                char sender_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
+                std::cout << "Bước 1: Nhận được SYN từ " << sender_ip << ":" << ntohs(sender_addr.sin_port) << std::endl;
+                
+                // Bước 2: Gửi SYN-ACK
+                HandshakePacket syn_ack;
+                syn_ack.flags = SYN | ACK;
+                
+                std::cout << "Bước 2: Gửi SYN-ACK" << std::endl;
+                sendto(sock, &syn_ack, sizeof(syn_ack), 0,
+                      (struct sockaddr*)&sender_addr, addr_len);
+                
+                // Bước 3: Đợi ACK
+                auto start_time = std::chrono::high_resolution_clock::now();
+                while (true) {
+                    HandshakePacket ack_packet;
+                    struct sockaddr_in temp_addr;
+                    socklen_t temp_len = sizeof(temp_addr);
+                    
+                    ssize_t ack_len = recvfrom(sock, &ack_packet, sizeof(ack_packet), 0,
+                                              (struct sockaddr*)&temp_addr, &temp_len);
+                    
+                    if (ack_len > 0 && ack_len == sizeof(HandshakePacket) && (ack_packet.flags & ACK)) {
+                        std::cout << "Bước 3: Nhận được ACK" << std::endl;
+                        std::cout << "✓ Handshake thành công! Sẵn sàng nhận dữ liệu." << std::endl;
+                        std::cout << "=== KẾT THÚC HANDSHAKE ===\n" << std::endl;
+                        return true;
+                    }
+                    
+                    // Timeout - gửi lại SYN-ACK
+                    auto now = std::chrono::high_resolution_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
+                    if (elapsed.count() >= 1000) {
+                        std::cout << "Timeout! Gửi lại SYN-ACK..." << std::endl;
+                        sendto(sock, &syn_ack, sizeof(syn_ack), 0,
+                              (struct sockaddr*)&sender_addr, addr_len);
+                        start_time = now;
+                    }
+                }
+            }
+        }
+    }
+    
+    return false;
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 4) {
         std::cerr << "Usage: " << argv[0] << " <port> <output_file> <original_file>" << std::endl;
@@ -38,7 +111,7 @@ int main(int argc, char* argv[]) {
     const char* output_file = argv[2];
     const char* original_file = argv[3];
     
-    std::cout << "Sử dụng giao thức: Selective Repeat" << std::endl;
+    std::cout << "Sử dụng giao thức: Selective Repeat với Handshake" << std::endl;
 
     // Kiểm tra file gốc
     std::ifstream orig_file(original_file, std::ios::binary | std::ios::ate);
@@ -51,7 +124,7 @@ int main(int argc, char* argv[]) {
     orig_file.close();
     
     std::cout << "Kích thước file gốc: " << std::fixed << std::setprecision(2) 
-                << original_size / 1024.0 / 1024.0 << " MB" << std::endl;
+              << original_size / 1024.0 / 1024.0 << " MB" << std::endl;
 
     // Tạo UDP socket
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -81,6 +154,16 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Đang lắng nghe trên port " << port << "..." << std::endl;
 
+    // Chờ handshake
+    struct sockaddr_in sender_addr;
+    socklen_t addr_len = sizeof(sender_addr);
+    
+    if (!waitForHandshake(sock, sender_addr, addr_len)) {
+        std::cerr << "Handshake thất bại!" << std::endl;
+        close(sock);
+        return 1;
+    }
+
     // Mở file để ghi
     std::ofstream file(output_file, std::ios::binary);
     if (!file.is_open()) {
@@ -90,18 +173,15 @@ int main(int argc, char* argv[]) {
     }
 
     char buffer[CHUNK_SIZE + HEADER_SIZE];
-    struct sockaddr_in sender_addr;
-    socklen_t addr_len = sizeof(sender_addr);
 
-    uint32_t expected_seq_num = 1;  // Packet tiếp theo cần nhận
-    std::map<uint32_t, BufferedPacket> receive_buffer;  // Buffer cho SR
+    uint32_t expected_seq_num = 1;
+    std::map<uint32_t, BufferedPacket> receive_buffer;
     
     uint64_t packets_received = 0;
     uint64_t total_bytes_received = 0;
     uint64_t duplicate_packets = 0;
     uint64_t out_of_order_packets = 0;
     uint64_t acks_sent = 0;
-    bool started = false;
 
     auto start_time = std::chrono::high_resolution_clock::now();
     auto last_packet_time = start_time;
@@ -114,25 +194,19 @@ int main(int argc, char* argv[]) {
                                     (struct sockaddr*)&sender_addr, &addr_len);
 
         if (recv_len < 0) {
-            // Timeout
             auto now = std::chrono::high_resolution_clock::now();
             auto idle_time = std::chrono::duration_cast<std::chrono::seconds>(now - last_packet_time);
             
             if (idle_time.count() >= TIMEOUT_SEC) {
-                if (started) {
-                    std::cout << "\nTimeout - kết thúc nhận dữ liệu" << std::endl;
-                    break;
-                }
+                std::cout << "\nTimeout - kết thúc nhận dữ liệu" << std::endl;
+                break;
             }
             continue;
         }
 
-        if (!started) {
-            started = true;
-            start_time = std::chrono::high_resolution_clock::now();
-            char sender_ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
-            std::cout << "Bắt đầu nhận từ: " << sender_ip << ":" << ntohs(sender_addr.sin_port) << std::endl;
+        // Bỏ qua gói tin handshake nếu nhận được
+        if (recv_len == sizeof(HandshakePacket)) {
+            continue;
         }
 
         last_packet_time = std::chrono::high_resolution_clock::now();
@@ -141,11 +215,9 @@ int main(int argc, char* argv[]) {
         PacketHeader* header = (PacketHeader*)buffer;
         uint32_t pkt_num = header->pkt_num;
 
-        // ========== SELECTIVE REPEAT ==========
+        // Selective Repeat logic
         if (pkt_num >= expected_seq_num && pkt_num < expected_seq_num + WINDOW_SIZE) {
-            // Packet trong window
-            
-            // Gửi ACK cho packet này (Individual ACK)
+            // Gửi ACK
             AckPacket ack;
             ack.ack_num = pkt_num;
             sendto(sock, &ack, sizeof(ack), 0,
@@ -153,13 +225,13 @@ int main(int argc, char* argv[]) {
             acks_sent++;
 
             if (pkt_num == expected_seq_num) {
-                // Packet đúng thứ tự - ghi ngay vào file
+                // Packet đúng thứ tự
                 file.write(buffer + HEADER_SIZE, recv_len - HEADER_SIZE);
                 packets_received++;
                 total_bytes_received += (recv_len - HEADER_SIZE);
                 expected_seq_num++;
 
-                // Kiểm tra buffer xem có packet tiếp theo không
+                // Kiểm tra buffer
                 while (receive_buffer.find(expected_seq_num) != receive_buffer.end()) {
                     BufferedPacket& buffered = receive_buffer[expected_seq_num];
                     file.write(buffered.data.data(), buffered.data.size());
@@ -170,7 +242,7 @@ int main(int argc, char* argv[]) {
                 }
 
             } else if (pkt_num > expected_seq_num) {
-                // Packet đến sớm - lưu vào buffer
+                // Packet đến sớm - buffer
                 if (receive_buffer.find(pkt_num) == receive_buffer.end()) {
                     BufferedPacket buffered;
                     buffered.data.resize(recv_len - HEADER_SIZE);
@@ -182,12 +254,10 @@ int main(int argc, char* argv[]) {
                     duplicate_packets++;
                 }
             } else {
-                // Packet cũ - duplicate
                 duplicate_packets++;
             }
 
         } else if (pkt_num < expected_seq_num) {
-            // Packet đã nhận rồi - gửi lại ACK
             duplicate_packets++;
             
             AckPacket ack;
@@ -197,7 +267,7 @@ int main(int argc, char* argv[]) {
             acks_sent++;
         }
 
-        // Hiển thị tiến trình mỗi 500ms
+        // Hiển thị tiến trình
         auto now = std::chrono::high_resolution_clock::now();
         auto progress_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_time);
         if (progress_elapsed.count() >= 500) {
