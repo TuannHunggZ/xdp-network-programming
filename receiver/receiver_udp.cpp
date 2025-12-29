@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
+#include <vector>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -34,6 +35,13 @@ int main(int argc, char* argv[]) {
     std::cout << "Kích thước file gốc: " << std::fixed << std::setprecision(2) 
                 << original_size / 1024.0 / 1024.0 << " MB" << std::endl;
 
+    // CẤP PHÁT MEMORY ĐỂ LƯU DỮ LIỆU
+    std::cout << "Cấp phát memory để nhận dữ liệu..." << std::endl;
+    std::vector<char> received_data;
+    received_data.reserve(original_size);
+    std::cout << "Đã cấp phát " << std::setprecision(2) 
+              << original_size / 1024.0 / 1024.0 << " MB memory!" << std::endl;
+
     // Tạo UDP socket
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
@@ -62,14 +70,6 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Đang lắng nghe trên port " << port << "..." << std::endl;
 
-    // Mở file để ghi
-    std::ofstream file(output_file, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Không thể tạo file output: " << output_file << std::endl;
-        close(sock);
-        return 1;
-    }
-
     char buffer[CHUNK_SIZE];
     struct sockaddr_in sender_addr;
     socklen_t addr_len = sizeof(sender_addr);
@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
     auto start_time = std::chrono::high_resolution_clock::now();
     auto last_packet_time = start_time;
 
-    std::cout << "Đang nhận dữ liệu (UDP)..." << std::endl;
+    std::cout << "Đang nhận dữ liệu vào memory (UDP)..." << std::endl;
 
     while (true) {
         ssize_t recv_len = recvfrom(sock, buffer, sizeof(buffer), 0,
@@ -111,8 +111,8 @@ int main(int argc, char* argv[]) {
 
         last_packet_time = std::chrono::high_resolution_clock::now();
 
-        // Ghi dữ liệu trực tiếp vào file (theo thứ tự nhận được)
-        file.write(buffer, recv_len);
+        // Lưu dữ liệu vào memory thay vì ghi file ngay
+        received_data.insert(received_data.end(), buffer, buffer + recv_len);
         
         packets_received++;
         total_bytes_received += recv_len;
@@ -135,7 +135,19 @@ int main(int argc, char* argv[]) {
     auto end_time = last_packet_time;
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
+    std::cout << "\n\nĐang ghi dữ liệu từ memory ra file..." << std::endl;
+
+    // GHI DỮ LIỆU TỪ MEMORY RA FILE (không tính vào thời gian đo)
+    std::ofstream file(output_file, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Không thể tạo file output: " << output_file << std::endl;
+        close(sock);
+        return 1;
+    }
+    
+    file.write(received_data.data(), received_data.size());
     file.close();
+    std::cout << "Đã ghi xong file!" << std::endl;
 
     // Lấy kích thước file thực tế đã nhận
     std::ifstream check_file(output_file, std::ios::binary | std::ios::ate);
@@ -146,7 +158,7 @@ int main(int argc, char* argv[]) {
     int64_t data_lost = original_size - received_size;
     double loss_rate = (original_size > 0) ? (data_lost * 100.0 / original_size) : 0;
 
-    std::cout << "\n\n=== KẾT QUẢ NHẬN (UDP) ===" << std::endl;
+    std::cout << "\n=== KẾT QUẢ NHẬN (UDP) ===" << std::endl;
     std::cout << "Tổng thời gian: " << std::fixed << std::setprecision(3) 
               << duration.count() / 1000.0 << " giây" << std::endl;
     std::cout << "Packets đã nhận: " << packets_received << std::endl;
@@ -166,8 +178,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Tốc độ trung bình: " << std::setprecision(2) 
               << (total_bytes_received * 8.0 / 1024.0 / 1024.0) / (duration.count() / 1000.0) 
               << " Mbps" << std::endl;
-    std::cout << "Lưu ý: UDP không đảm bảo tính toàn vẹn, không đảm bảo thứ tự và không đảm bảo tất cả gói tin đến đích. Việc tính dữ liệu bị mất chỉ dựa trên việc so sánh kích thước file nhận được với file gốc."
-              << std::endl;
+    std::cout << "\nLưu ý: UDP không đảm bảo tính toàn vẹn, không đảm bảo thứ tự và không đảm bảo tất cả gói tin đến đích." << std::endl;
 
     close(sock);
 

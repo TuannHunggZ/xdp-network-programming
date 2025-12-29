@@ -13,7 +13,7 @@
 #define CHUNK_SIZE 972
 #define TIMEOUT_SEC 5
 #define HEADER_SIZE 4
-#define WINDOW_SIZE 5
+#define WINDOW_SIZE 10
 
 // Handshake flags (1 byte)
 #define SYN 0x01   // 0000 0001 - Yêu cầu kết nối
@@ -126,6 +126,13 @@ int main(int argc, char* argv[]) {
     std::cout << "Kích thước file gốc: " << std::fixed << std::setprecision(2) 
               << original_size / 1024.0 / 1024.0 << " MB" << std::endl;
 
+    // CẤP PHÁT MEMORY ĐỂ LƯU DỮ LIỆU
+    std::cout << "Cấp phát memory để nhận dữ liệu..." << std::endl;
+    std::vector<char> received_data;
+    received_data.reserve(original_size);
+    std::cout << "Đã cấp phát " << std::setprecision(2) 
+              << original_size / 1024.0 / 1024.0 << " MB memory!" << std::endl;
+
     // Tạo UDP socket
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
@@ -164,14 +171,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Mở file để ghi
-    std::ofstream file(output_file, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Không thể tạo file output: " << output_file << std::endl;
-        close(sock);
-        return 1;
-    }
-
     char buffer[CHUNK_SIZE + HEADER_SIZE];
 
     uint32_t expected_seq_num = 1;
@@ -187,7 +186,7 @@ int main(int argc, char* argv[]) {
     auto last_packet_time = start_time;
     auto last_progress_time = start_time;
 
-    std::cout << "Đang nhận dữ liệu với Selective Repeat..." << std::endl;
+    std::cout << "Đang nhận dữ liệu vào memory với Selective Repeat..." << std::endl;
 
     while (true) {
         ssize_t recv_len = recvfrom(sock, buffer, sizeof(buffer), 0,
@@ -225,16 +224,21 @@ int main(int argc, char* argv[]) {
             acks_sent++;
 
             if (pkt_num == expected_seq_num) {
-                // Packet đúng thứ tự
-                file.write(buffer + HEADER_SIZE, recv_len - HEADER_SIZE);
+                // Packet đúng thứ tự - LƯU VÀO MEMORY
+                size_t data_size = recv_len - HEADER_SIZE;
+                received_data.insert(received_data.end(), 
+                                    buffer + HEADER_SIZE, 
+                                    buffer + HEADER_SIZE + data_size);
                 packets_received++;
-                total_bytes_received += (recv_len - HEADER_SIZE);
+                total_bytes_received += data_size;
                 expected_seq_num++;
 
                 // Kiểm tra buffer
                 while (receive_buffer.find(expected_seq_num) != receive_buffer.end()) {
                     BufferedPacket& buffered = receive_buffer[expected_seq_num];
-                    file.write(buffered.data.data(), buffered.data.size());
+                    received_data.insert(received_data.end(), 
+                                        buffered.data.begin(), 
+                                        buffered.data.end());
                     packets_received++;
                     total_bytes_received += buffered.data.size();
                     receive_buffer.erase(expected_seq_num);
@@ -283,7 +287,19 @@ int main(int argc, char* argv[]) {
     auto end_time = last_packet_time;
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
+    std::cout << "\n\nĐang ghi dữ liệu từ memory ra file..." << std::endl;
+
+    // GHI DỮ LIỆU TỪ MEMORY RA FILE (không tính vào thời gian đo)
+    std::ofstream file(output_file, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Không thể tạo file output: " << output_file << std::endl;
+        close(sock);
+        return 1;
+    }
+    
+    file.write(received_data.data(), received_data.size());
     file.close();
+    std::cout << "Đã ghi xong file!" << std::endl;
 
     // Lấy kích thước file thực tế
     std::ifstream check_file(output_file, std::ios::binary | std::ios::ate);
@@ -294,7 +310,7 @@ int main(int argc, char* argv[]) {
     int64_t data_lost = original_size - received_size;
     double loss_rate = (original_size > 0) ? (data_lost * 100.0 / original_size) : 0;
 
-    std::cout << "\n\n=== KẾT QUẢ NHẬN (Selective Repeat) ===" << std::endl;
+    std::cout << "\n=== KẾT QUẢ NHẬN (Selective Repeat) ===" << std::endl;
     std::cout << "Tổng thời gian: " << std::fixed << std::setprecision(3) 
               << duration.count() / 1000.0 << " giây" << std::endl;
     std::cout << "Packets đã nhận: " << packets_received << std::endl;

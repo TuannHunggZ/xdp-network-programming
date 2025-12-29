@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
+#include <vector>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -33,6 +34,13 @@ int main(int argc, char* argv[]) {
     
     std::cout << "Kích thước file gốc: " << std::fixed << std::setprecision(2) 
                 << original_size / 1024.0 / 1024.0 << " MB" << std::endl;
+
+    // CẤP PHÁT MEMORY ĐỂ LƯU DỮ LIỆU
+    std::cout << "Cấp phát memory để nhận dữ liệu..." << std::endl;
+    std::vector<char> received_data;
+    received_data.reserve(original_size);
+    std::cout << "Đã cấp phát " << std::setprecision(2) 
+              << original_size / 1024.0 / 1024.0 << " MB memory!" << std::endl;
 
     // Tạo TCP socket
     int server_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -78,15 +86,6 @@ int main(int argc, char* argv[]) {
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
     std::cout << "Đã kết nối từ: " << client_ip << ":" << ntohs(client_addr.sin_port) << std::endl;
 
-    // Mở file để ghi
-    std::ofstream file(output_file, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Không thể tạo file output: " << output_file << std::endl;
-        close(client_sock);
-        close(server_sock);
-        return 1;
-    }
-
     // Bắt đầu đo thời gian
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -94,8 +93,9 @@ int main(int argc, char* argv[]) {
     uint64_t total_received = 0;
     uint64_t chunks_received = 0;
 
-    std::cout << "Đang nhận dữ liệu..." << std::endl;
+    std::cout << "Đang nhận dữ liệu vào memory..." << std::endl;
 
+    // Nhận dữ liệu vào memory
     while (total_received < original_size) {
         // Tính số bytes cần nhận
         size_t bytes_to_receive = std::min((uint64_t)CHUNK_SIZE, original_size - total_received);
@@ -111,8 +111,8 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        // Ghi vào file
-        file.write(buffer, received);
+        // Lưu vào memory thay vì ghi file ngay
+        received_data.insert(received_data.end(), buffer, buffer + received);
         total_received += received;
         chunks_received++;
 
@@ -136,7 +136,20 @@ int main(int argc, char* argv[]) {
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
+    std::cout << "\n\nĐang ghi dữ liệu từ memory ra file..." << std::endl;
+    
+    // GHI DỮ LIỆU TỪ MEMORY RA FILE (không tính vào thời gian đo)
+    std::ofstream file(output_file, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Không thể tạo file output: " << output_file << std::endl;
+        close(client_sock);
+        close(server_sock);
+        return 1;
+    }
+    
+    file.write(received_data.data(), received_data.size());
     file.close();
+    std::cout << "Đã ghi xong file!" << std::endl;
 
     // Lấy kích thước file thực tế đã nhận
     std::ifstream check_file(output_file, std::ios::binary | std::ios::ate);
@@ -147,7 +160,7 @@ int main(int argc, char* argv[]) {
     int64_t data_lost = original_size - received_size;
     double loss_rate = (original_size > 0) ? (data_lost * 100.0 / original_size) : 0;
 
-    std::cout << "\n\n=== KẾT QUẢ NHẬN (TCP) ===" << std::endl;
+    std::cout << "\n=== KẾT QUẢ NHẬN (TCP) ===" << std::endl;
     std::cout << "Tổng thời gian: " << std::fixed << std::setprecision(3) 
               << duration.count() / 1000.0 << " giây" << std::endl;
     std::cout << "Dữ liệu đã nhận: " << std::setprecision(2) 

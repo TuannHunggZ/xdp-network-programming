@@ -14,7 +14,7 @@
 #define CHUNK_SIZE 972
 #define HEADER_SIZE 4
 #define ACK_TIMEOUT_MS 500
-#define WINDOW_SIZE 5
+#define WINDOW_SIZE 10
 #define HANDSHAKE_TIMEOUT_MS 2000
 #define MAX_HANDSHAKE_RETRIES 5
 
@@ -125,10 +125,12 @@ int main(int argc, char* argv[]) {
     std::cout << "Kích thước file: " << file_size << " bytes (" 
               << std::fixed << std::setprecision(2) << file_size / 1024.0 / 1024.0 << " MB)" << std::endl;
 
-    // Đọc toàn bộ file vào bộ nhớ
+    // ĐỌC TOÀN BỘ FILE VÀO MEMORY
+    std::cout << "Đang đọc file vào memory..." << std::endl;
     std::vector<char> file_data(file_size);
     file.read(file_data.data(), file_size);
     file.close();
+    std::cout << "Đã đọc xong file vào memory!" << std::endl;
 
     // Tính số packet
     uint64_t total_packets = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -166,6 +168,10 @@ int main(int argc, char* argv[]) {
     tv.tv_usec = 10000; // 10ms
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    // Bắt đầu đo thời gian (SAU khi handshake hoàn tất)
+    auto start_time = std::chrono::high_resolution_clock::now();
+    auto last_progress_time = start_time;
+
     // Sliding window
     std::map<uint32_t, WindowPacket> window;
     uint32_t base = 1;
@@ -175,10 +181,7 @@ int main(int argc, char* argv[]) {
     uint64_t total_retransmissions = 0;
     uint64_t acks_received = 0;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-    auto last_progress_time = start_time;
-
-    std::cout << "Bắt đầu truyền dữ liệu với Selective Repeat..." << std::endl;
+    std::cout << "Bắt đầu truyền dữ liệu từ memory với Selective Repeat..." << std::endl;
 
     while (base <= total_packets) {
         auto now = std::chrono::high_resolution_clock::now();
