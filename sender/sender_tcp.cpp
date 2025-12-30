@@ -10,7 +10,7 @@
 #include <chrono>
 #include <iomanip>
 
-#define CHUNK_SIZE 972
+#define CHUNK_SIZE 1024
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {

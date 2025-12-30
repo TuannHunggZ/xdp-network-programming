@@ -13,15 +13,41 @@
 #define CHUNK_SIZE 972
 #define TIMEOUT_SEC 5
 #define HEADER_SIZE 4
-#define WINDOW_SIZE 10
+#define DEFAULT_WINDOW_SIZE 5
+#define MAX_WINDOW_SIZE 8191  // 2^13 - 1 (13 bits)
 
-// Handshake flags (1 byte)
+// Handshake flags (3 bits cuối)
 #define SYN 0x01   // 0000 0001 - Yêu cầu kết nối
 #define ACK 0x02   // 0000 0010 - Xác nhận
 #define FIN 0x04   // 0000 0100 - Kết thúc kết nối
 
+// Handshake packet structure (16 bits = 2 bytes)
+// Format: [13 bits: window_size][3 bits: flags]
 struct HandshakePacket {
-    uint8_t flags;  // 1 byte cho handshake
+    uint16_t data;  // 13 bits window size + 3 bits flags
+    
+    // Set window size (13 bits đầu)
+    void setWindowSize(uint16_t window_size) {
+        if (window_size > MAX_WINDOW_SIZE) {
+            window_size = MAX_WINDOW_SIZE;
+        }
+        data = (window_size << 3) | (data & 0x07);
+    }
+    
+    // Get window size
+    uint16_t getWindowSize() const {
+        return (data >> 3) & 0x1FFF;  // Lấy 13 bits đầu
+    }
+    
+    // Set flags (3 bits cuối)
+    void setFlags(uint8_t flags) {
+        data = (data & 0xFFF8) | (flags & 0x07);
+    }
+    
+    // Get flags
+    uint8_t getFlags() const {
+        return data & 0x07;  // Lấy 3 bits cuối
+    }
 };
 
 struct PacketHeader {
@@ -37,9 +63,11 @@ struct BufferedPacket {
     bool received;
 };
 
-bool waitForHandshake(int sock, struct sockaddr_in& sender_addr, socklen_t& addr_len) {
+bool waitForHandshake(int sock, struct sockaddr_in& sender_addr, socklen_t& addr_len, 
+                     uint16_t preferred_window, uint16_t& negotiated_window) {
     std::cout << "\n=== CHỜ HANDSHAKE ===" << std::endl;
     std::cout << "Đang đợi yêu cầu kết nối từ sender..." << std::endl;
+    std::cout << "Window size ưa thích của receiver: " << preferred_window << std::endl;
     
     HandshakePacket packet;
     
@@ -51,19 +79,27 @@ bool waitForHandshake(int sock, struct sockaddr_in& sender_addr, socklen_t& addr
             continue;
         }
         
-        // Kiểm tra nếu là gói tin handshake (kích thước nhỏ)
+        // Kiểm tra nếu là gói tin handshake (kích thước đúng)
         if (recv_len == sizeof(HandshakePacket)) {
             // Bước 1: Nhận SYN
-            if (packet.flags & SYN) {
+            if (packet.getFlags() & SYN) {
+                uint16_t sender_window = packet.getWindowSize();
+                
                 char sender_ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
                 std::cout << "Bước 1: Nhận được SYN từ " << sender_ip << ":" << ntohs(sender_addr.sin_port) << std::endl;
+                std::cout << "        Sender đề xuất window_size=" << sender_window << std::endl;
                 
-                // Bước 2: Gửi SYN-ACK
+                // Thỏa thuận window size (chọn giá trị nhỏ hơn)
+                negotiated_window = std::min(sender_window, preferred_window);
+                std::cout << "        Receiver chọn window_size=" << negotiated_window << std::endl;
+                
+                // Bước 2: Gửi SYN-ACK với window size đã chọn
                 HandshakePacket syn_ack;
-                syn_ack.flags = SYN | ACK;
+                syn_ack.setWindowSize(negotiated_window);
+                syn_ack.setFlags(SYN | ACK);
                 
-                std::cout << "Bước 2: Gửi SYN-ACK" << std::endl;
+                std::cout << "Bước 2: Gửi SYN-ACK với window_size=" << negotiated_window << std::endl;
                 sendto(sock, &syn_ack, sizeof(syn_ack), 0,
                       (struct sockaddr*)&sender_addr, addr_len);
                 
@@ -77,9 +113,10 @@ bool waitForHandshake(int sock, struct sockaddr_in& sender_addr, socklen_t& addr
                     ssize_t ack_len = recvfrom(sock, &ack_packet, sizeof(ack_packet), 0,
                                               (struct sockaddr*)&temp_addr, &temp_len);
                     
-                    if (ack_len > 0 && ack_len == sizeof(HandshakePacket) && (ack_packet.flags & ACK)) {
+                    if (ack_len > 0 && ack_len == sizeof(HandshakePacket) && (ack_packet.getFlags() & ACK)) {
                         std::cout << "Bước 3: Nhận được ACK" << std::endl;
-                        std::cout << "✓ Handshake thành công! Sẵn sàng nhận dữ liệu." << std::endl;
+                        std::cout << "✓ Handshake thành công!" << std::endl;
+                        std::cout << "✓ Window size cuối cùng: " << negotiated_window << std::endl;
                         std::cout << "=== KẾT THÚC HANDSHAKE ===\n" << std::endl;
                         return true;
                     }
@@ -110,8 +147,9 @@ int main(int argc, char* argv[]) {
     int port = std::stoi(argv[1]);
     const char* output_file = argv[2];
     const char* original_file = argv[3];
+    uint16_t preferred_window = DEFAULT_WINDOW_SIZE;
     
-    std::cout << "Sử dụng giao thức: Selective Repeat với Handshake" << std::endl;
+    std::cout << "Sử dụng giao thức: Selective Repeat với Handshake (16-bit)" << std::endl;
 
     // Kiểm tra file gốc
     std::ifstream orig_file(original_file, std::ios::binary | std::ios::ate);
@@ -161,15 +199,18 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Đang lắng nghe trên port " << port << "..." << std::endl;
 
-    // Chờ handshake
+    // Chờ handshake và thỏa thuận window size
     struct sockaddr_in sender_addr;
     socklen_t addr_len = sizeof(sender_addr);
+    uint16_t negotiated_window;
     
-    if (!waitForHandshake(sock, sender_addr, addr_len)) {
+    if (!waitForHandshake(sock, sender_addr, addr_len, preferred_window, negotiated_window)) {
         std::cerr << "Handshake thất bại!" << std::endl;
         close(sock);
         return 1;
     }
+
+    std::cout << "Sử dụng window size: " << negotiated_window << std::endl;
 
     char buffer[CHUNK_SIZE + HEADER_SIZE];
 
@@ -214,8 +255,8 @@ int main(int argc, char* argv[]) {
         PacketHeader* header = (PacketHeader*)buffer;
         uint32_t pkt_num = header->pkt_num;
 
-        // Selective Repeat logic
-        if (pkt_num >= expected_seq_num && pkt_num < expected_seq_num + WINDOW_SIZE) {
+        // Selective Repeat logic với negotiated window size
+        if (pkt_num >= expected_seq_num && pkt_num < expected_seq_num + negotiated_window) {
             // Gửi ACK
             AckPacket ack;
             ack.ack_num = pkt_num;
@@ -311,6 +352,7 @@ int main(int argc, char* argv[]) {
     double loss_rate = (original_size > 0) ? (data_lost * 100.0 / original_size) : 0;
 
     std::cout << "\n=== KẾT QUẢ NHẬN (Selective Repeat) ===" << std::endl;
+    std::cout << "Window size đã sử dụng: " << negotiated_window << std::endl;
     std::cout << "Tổng thời gian: " << std::fixed << std::setprecision(3) 
               << duration.count() / 1000.0 << " giây" << std::endl;
     std::cout << "Packets đã nhận: " << packets_received << std::endl;

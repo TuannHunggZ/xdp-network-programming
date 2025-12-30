@@ -9,7 +9,7 @@
 #include <chrono>
 #include <iomanip>
 
-#define CHUNK_SIZE 972
+#define CHUNK_SIZE 1024
 #define TIMEOUT_SEC 3
 
 int main(int argc, char* argv[]) {
